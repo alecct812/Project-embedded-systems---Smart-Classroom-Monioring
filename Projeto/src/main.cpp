@@ -1,34 +1,10 @@
 /*
  * =====================================================================
- * SISTEMA DE MONITORAMENTO DE SALA DE AULA INTELIGENTE
+ * Sistema de Monitoramento de Sala Inteligente - Grupo 10
+ * ESP32 + FreeRTOS + MQTT + Docker Mosquitto
  * =====================================================================
- * Projeto: IoT - Monitoramento Ambiental com ESP32
- * Grupo: 10
- * Disciplina: Sistemas Embarcados
- *
- * Descrição:
- * Sistema distribuído usando 1 ESP32 para monitorar condições ambientais
- * (temperatura, umidade, luminosidade) e detecção de presença em tempo real.
- *
- * Tecnologias Utilizadas:
- * - Hardware: ESP32 (NodeMCU)
- * - Firmware: FreeRTOS (Tasks e Filas)
- * - Protocolo: MQTT (PubSubClient)
- * - Comunicação: Wi-Fi
- * - Dashboard: Node-RED
- *
- * Arquitetura FreeRTOS:
- * - Task 1 (Core 0): Leitura DHT11 (temp/umidade) - 5s
- * - Task 2 (Core 0): Leitura LDR (luminosidade) - 5s
- * - Task 3 (Core 0): Leitura PIR (presença) - 500ms
- * - Task 4 (Core 1): Publicação MQTT - 100ms
- * - Filas: Comunicação assíncrona entre tasks
- *
- * Sensores:
- * - DHT11: Temperatura e umidade
- * - LDR: Luminosidade ambiente
- * - PIR: Detecção de movimento/presença
- * - LED: Indicador visual de ocupação
+ * Sensores: DHT11, LDR, TCRT-5000 (x2), LED
+ * Tasks: DHT11, LDR, TCRT, LED, MQTT
  * =====================================================================
  */
 
@@ -37,54 +13,41 @@
 #include <PubSubClient.h>
 #include <DHT.h>
 
-// ========== CONFIGURAÇÕES DE REDE ==========
-// ALTERE ESTAS CONFIGURAÇÕES PARA SUA REDE
-const char *ssid = "uaifai-tiradentes";    // Nome da rede Wi-Fi
-const char *password = "bemvindoaocesar";  // Senha da rede Wi-Fi
-// const char *mqtt_server = "172.26.70.247"; // IP do Broker MQTT (Raspberry Pi ou PC local)
-IPAddress MQTT_IP(172, 26, 70, 247);
-// const int mqtt_port = 1883;
-const uint16_t MQTT_PORT = 1883;              // Porta padrão MQTT
+// ========== CONFIGURAÇÕES ==========
+const char *ssid = "uaifai-tiradentes";
+const char *password = "bemvindoaocesar";
+// IMPORTANTE: Ajuste o IP do broker MQTT conforme seu servidor
+const char *mqtt_server = "172.26.70.17";  // IP do Broker MQTT
+const uint16_t MQTT_PORT = 1883;
 
-// ========== CONFIGURAÇÕES DE PINOS ==========
-// Configuração dos pinos GPIO do ESP32
-#define DHT_PIN 4     // GPIO 4 - Sensor DHT11 (Temperatura e Umidade)
-#define DHT_TYPE DHT11 // Tipo do sensor DHT
-#define LDR_PIN 32     // GPIO 32 - Sensor LDR (Luminosidade) - Apenas INPUT (ADC)
-#define PIR_PIN 13     // GPIO 13 - Sensor PIR (Presença/Movimento)
-#define LED_PIN 2      // GPIO 2 - LED indicador de ocupação
+#define DHT_PIN 4
+#define DHT_TYPE DHT11
+#define LDR_PIN 32
+#define TCRT_SENSOR1_PIN 13 // Externo
+#define TCRT_SENSOR2_PIN 14 // Interno
+#define LED_PIN 2
 
-// ========== PARÂMETROS IDEAIS ==========
-const float TEMP_MIN = 20.0;
-const float TEMP_MAX = 25.0;
-const float UMID_MIN = 40.0;
-const float UMID_MAX = 60.0;
+const float TEMP_MIN = 20.0, TEMP_MAX = 25.0;
+const float UMID_MIN = 40.0, UMID_MAX = 60.0;
+const unsigned long TIMEOUT_SEQUENCIA = 2000;
+const unsigned long DEBOUNCE_DELAY = 50;
 
 // ========== OBJETOS GLOBAIS ==========
 WiFiClient espClient;
 PubSubClient client(espClient);
 DHT dht(DHT_PIN, DHT_TYPE);
 
-// ========== VARIÁVEIS DE CONTROLE ==========
-bool dhtDisponivel = false;
-bool ldrDisponivel = false;
-bool pirDisponivel = false;
+bool dhtDisponivel = false, ldrDisponivel = false, tcrtDisponivel = false;
+int pessoasNaSala = 0;
+bool salaOcupada = false;
 
-// ========== FILAS FREERTOS ==========
-QueueHandle_t queueTemp;
-QueueHandle_t queueUmid;
-QueueHandle_t queueLuz;
-QueueHandle_t queuePresenca;
+QueueHandle_t queueTemp, queueUmid, queueLuz, queueEntradaSaida;
 
-// ========== FUNÇÕES DE CONEXÃO ==========
-
+// ========== CONEXÃO WI-FI ==========
 void setup_wifi()
 {
-  delay(10);
-  Serial.println();
-  Serial.print("Conectando ao Wi-Fi: ");
+  Serial.print("\nConectando ao Wi-Fi: ");
   Serial.println(ssid);
-
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED)
@@ -93,114 +56,83 @@ void setup_wifi()
     Serial.print(".");
   }
 
-  Serial.println("");
-  Serial.println("WiFi conectado!");
-  Serial.print("Endereço IP: ");
+  Serial.println("\n✓ WiFi conectado!");
+  Serial.print("IP: ");
   Serial.println(WiFi.localIP());
 }
 
+// ========== CONEXÃO MQTT ==========
 void reconnect()
 {
   while (!client.connected())
   {
-    Serial.print("Conectando ao MQTT...");
-
-    String clientId = "ESP32_" + String((uint32_t)ESP.getEfuseMac(), HEX);
+    Serial.print("Conectando MQTT...");
+    String clientId = "ESP32_Sala_" + String((uint32_t)ESP.getEfuseMac(), HEX);
 
     if (client.connect(clientId.c_str()))
     {
-      Serial.println("Conectado!");
+      Serial.println(" ✓ Conectado!");
+      client.publish("sala/status", "ESP32 Online");
     }
     else
     {
-      Serial.print("Falha, rc=");
+      Serial.print(" ✗ Falha (");
       Serial.print(client.state());
-      Serial.println(" - Tentando novamente em 5s");
+      Serial.println(") - Tentando em 5s...");
       delay(5000);
     }
   }
 }
 
-// ========== DETECÇÃO AUTOMÁTICA DE SENSORES ==========
+// ========== DETECÇÃO DE SENSORES ==========
 void detectarSensores()
 {
-  Serial.println("\n╔════════════════════════════════════════╗");
-  Serial.println("║   DETECTANDO SENSORES CONECTADOS...   ║");
-  Serial.println("╚════════════════════════════════════════╝");
+  Serial.println("\n╔═══ DETECTANDO SENSORES ═══╗");
 
-  // Testa DHT11 (Temperatura e Umidade)
   dht.begin();
   delay(2000);
-  float testTemp = dht.readTemperature();
-  if (!isnan(testTemp))
-  {
-    dhtDisponivel = true;
-    Serial.println("✓ DHT11 detectado no GPIO 15");
-  }
-  else
-  {
-    Serial.println("✗ DHT11 NÃO detectado");
-  }
+  dhtDisponivel = !isnan(dht.readTemperature());
+  Serial.println(dhtDisponivel ? "✓ DHT11" : "✗ DHT11");
 
-  // Testa LDR (Luminosidade)
   pinMode(LDR_PIN, INPUT);
   int ldrVal = analogRead(LDR_PIN);
-  if (ldrVal > 0 && ldrVal < 4095)
-  {
-    ldrDisponivel = true;
-    Serial.println("✓ LDR detectado no GPIO 34");
-  }
-  else
-  {
-    Serial.println("✗ LDR NÃO detectado");
-  }
+  ldrDisponivel = (ldrVal > 0 && ldrVal < 4095);
+  Serial.println(ldrDisponivel ? "✓ LDR" : "✗ LDR");
 
-  // Testa PIR (Presença)
-  pinMode(PIR_PIN, INPUT);
-  pirDisponivel = true; // PIR sempre disponível se configurado
-  Serial.println("✓ PIR configurado no GPIO 13");
+  pinMode(TCRT_SENSOR1_PIN, INPUT_PULLUP);
+  pinMode(TCRT_SENSOR2_PIN, INPUT_PULLUP);
+  tcrtDisponivel = true;
+  Serial.println("✓ TCRT Sensor 1 (Externo)");
+  Serial.println("✓ TCRT Sensor 2 (Interno)");
 
-  // Configura LED
   pinMode(LED_PIN, OUTPUT);
-  Serial.println("✓ LED configurado no GPIO 32");
-
-  Serial.println("════════════════════════════════════════\n");
+  Serial.println("✓ LED");
+  Serial.println("╚═══════════════════════════╝\n");
 }
 
-// ========== TASK 1: LEITURA DO DHT11 (Temperatura e Umidade) ==========
-// Esta task roda no Core 0 e coleta dados do sensor DHT11 a cada 5 segundos
-// Utiliza vTaskDelayUntil para garantir período constante
+// ========== TASKS ==========
 void taskDHT11(void *pvParameters)
 {
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  const TickType_t xFrequency = pdMS_TO_TICKS(5000); // 5 segundos
-
   while (1)
   {
     if (dhtDisponivel)
     {
       float temp = dht.readTemperature();
       float umid = dht.readHumidity();
-
       if (!isnan(temp) && !isnan(umid))
       {
-        // Envia dados para as filas (comunicação inter-task)
         xQueueSend(queueTemp, &temp, portMAX_DELAY);
         xQueueSend(queueUmid, &umid, portMAX_DELAY);
       }
     }
-
-    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(5000));
   }
 }
 
-// ========== TASK 2: LEITURA DO LDR (Luminosidade) ==========
-// Esta task roda no Core 0 e mede a luminosidade ambiente a cada 5 segundos
 void taskLDR(void *pvParameters)
 {
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  const TickType_t xFrequency = pdMS_TO_TICKS(5000); // 5 segundos
-
   while (1)
   {
     if (ldrDisponivel)
@@ -209,236 +141,256 @@ void taskLDR(void *pvParameters)
       float luminosidade = map(ldrVal, 0, 4095, 0, 100);
       xQueueSend(queueLuz, &luminosidade, portMAX_DELAY);
     }
-
-    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(5000));
   }
 }
 
-// ========== TASK 3: LEITURA DO PIR (Presença) + Controle de LED ==========
-// Esta task roda no Core 0 e detecta presença a cada 500ms
-// Controla o LED indicador de ocupação da sala
-void taskPIR(void *pvParameters)
+// Task TCRT: Detecta sequência Sensor1→Sensor2 (ENTRADA) ou Sensor2→Sensor1 (SAÍDA)
+void taskTCRT(void *pvParameters)
 {
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
-
-  bool estadoAnterior = false;
+  bool estadoAnt1 = HIGH, estadoAnt2 = HIGH;
+  enum
+  {
+    AGUARDANDO,
+    SENSOR1_ATIVO,
+    SENSOR2_ATIVO
+  } estado = AGUARDANDO;
+  unsigned long tempoInicio = 0, ultLeitura1 = 0, ultLeitura2 = 0;
 
   while (1)
   {
-    if (pirDisponivel)
+    if (tcrtDisponivel)
     {
-      bool presenca = digitalRead(PIR_PIN);
+      unsigned long agora = millis();
+      bool leitura1 = digitalRead(TCRT_SENSOR1_PIN);
+      bool leitura2 = digitalRead(TCRT_SENSOR2_PIN);
 
-      // Atualiza LED (acende se ocupado, apaga se vazio)
-      digitalWrite(LED_PIN, presenca ? HIGH : LOW);
-
-      // Envia para fila apenas se o estado mudou (evita publicações desnecessárias)
-      if (presenca != estadoAnterior)
+      // Sensor 1 ativado (borda de descida)
+      if (estadoAnt1 == HIGH && leitura1 == LOW && (agora - ultLeitura1) > DEBOUNCE_DELAY)
       {
-        xQueueSend(queuePresenca, &presenca, portMAX_DELAY);
-        estadoAnterior = presenca;
+        ultLeitura1 = agora;
+        if (estado == AGUARDANDO)
+        {
+          estado = SENSOR1_ATIVO;
+          tempoInicio = agora;
+          Serial.println("\n🔵 Sensor 1 (EXTERNO) ativado");
+        }
+        else if (estado == SENSOR2_ATIVO && (agora - tempoInicio) <= TIMEOUT_SEQUENCIA)
+        {
+          int evento = -1; // SAÍDA
+          xQueueSend(queueEntradaSaida, &evento, 0);
+          Serial.println("🚪⬅️  SAÍDA (S2→S1)");
+          estado = AGUARDANDO;
+        }
       }
-    }
 
-    vTaskDelay(pdMS_TO_TICKS(500)); // Verifica a cada 500ms
+      // Sensor 2 ativado (borda de descida)
+      if (estadoAnt2 == HIGH && leitura2 == LOW && (agora - ultLeitura2) > DEBOUNCE_DELAY)
+      {
+        ultLeitura2 = agora;
+        if (estado == AGUARDANDO)
+        {
+          estado = SENSOR2_ATIVO;
+          tempoInicio = agora;
+          Serial.println("\n🟢 Sensor 2 (INTERNO) ativado");
+        }
+        else if (estado == SENSOR1_ATIVO && (agora - tempoInicio) <= TIMEOUT_SEQUENCIA)
+        {
+          int evento = 1; // ENTRADA
+          xQueueSend(queueEntradaSaida, &evento, 0);
+          Serial.println("🚪➡️  ENTRADA (S1→S2)");
+          estado = AGUARDANDO;
+        }
+      }
+
+      // Timeout - reseta estado
+      if (estado != AGUARDANDO && (agora - tempoInicio) > TIMEOUT_SEQUENCIA)
+      {
+        Serial.println("⏱️  Timeout");
+        estado = AGUARDANDO;
+      }
+
+      estadoAnt1 = leitura1;
+      estadoAnt2 = leitura2;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
-// ========== TASK 4: PUBLICAÇÃO MQTT ==========
-// Esta task roda no Core 1 (separado) e publica dados via MQTT
-// Consome dados das filas e envia para o broker MQTT (Node-RED)
-// Implementa lógica de alertas e sugestões inteligentes
+void taskLED(void *pvParameters)
+{
+  pinMode(LED_PIN, OUTPUT);
+  while (1)
+  {
+    digitalWrite(LED_PIN, salaOcupada ? HIGH : LOW);
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+}
+
 void taskMQTT(void *pvParameters)
 {
   float temperatura, umidade, luminosidade;
-  bool presenca;
+  int eventoEntradaSaida;
+  unsigned long ultimaTentativaReconexao = 0;
+  const unsigned long INTERVALO_RECONEXAO = 5000; // 5 segundos
 
   while (1)
   {
-    // Mantém conexão MQTT
+    // Reconexão MQTT com controle de tempo
     if (!client.connected())
     {
-      reconnect();
+      unsigned long agora = millis();
+      if (agora - ultimaTentativaReconexao >= INTERVALO_RECONEXAO)
+      {
+        ultimaTentativaReconexao = agora;
+        Serial.print("\n🔄 Reconectando MQTT...");
+        String clientId = "ESP32_Sala_" + String((uint32_t)ESP.getEfuseMac(), HEX);
+        
+        if (client.connect(clientId.c_str()))
+        {
+          Serial.println(" ✓ Reconectado!");
+          client.publish("sala/status", "ESP32 Reconectado");
+        }
+        else
+        {
+          Serial.printf(" ✗ Falha (%d)\n", client.state());
+        }
+      }
+      vTaskDelay(pdMS_TO_TICKS(1000)); // Aguarda 1s antes de tentar processar filas
+      continue;
     }
+    
     client.loop();
 
-    // Processa temperatura
+    // Temperatura
     if (xQueueReceive(queueTemp, &temperatura, 0) == pdTRUE)
     {
       char buffer[10];
       dtostrf(temperatura, 6, 2, buffer);
       client.publish("sala/temperatura", buffer);
-      Serial.printf("📊 Temperatura: %.2f °C\n", temperatura);
+      Serial.printf("📊 Temp: %.2f°C\n", temperatura);
 
-      // Alertas de temperatura
       if (temperatura < TEMP_MIN || temperatura > TEMP_MAX)
       {
-        char alerta[100];
-        snprintf(alerta, 100, "ALERTA: Temperatura fora do ideal (%.2f °C)", temperatura);
-        client.publish("sala/alertas", alerta);
-        Serial.println("⚠️  " + String(alerta));
-      }
-
-      // Sugestão de ar-condicionado
-      if (temperatura > TEMP_MAX)
-      {
-        client.publish("sala/sugestao_ac", "LIGAR");
-        Serial.println("❄️  Sugestão: LIGAR ar-condicionado");
-      }
-      else if (temperatura < TEMP_MIN + 1)
-      {
-        client.publish("sala/sugestao_ac", "DESLIGAR");
-        Serial.println("❄️  Sugestão: DESLIGAR ar-condicionado");
+        client.publish("sala/alertas", "Temperatura fora do ideal");
+        Serial.println("⚠️  Alerta: Temperatura!");
       }
     }
 
-    // Processa umidade
+    // Umidade
     if (xQueueReceive(queueUmid, &umidade, 0) == pdTRUE)
     {
       char buffer[10];
       dtostrf(umidade, 6, 2, buffer);
       client.publish("sala/umidade", buffer);
-      Serial.printf("💧 Umidade: %.2f %%\n", umidade);
+      Serial.printf("💧 Umid: %.2f%%\n", umidade);
 
-      // Alertas de umidade
       if (umidade < UMID_MIN || umidade > UMID_MAX)
       {
-        char alerta[100];
-        snprintf(alerta, 100, "ALERTA: Umidade fora do ideal (%.2f %%)", umidade);
-        client.publish("sala/alertas", alerta);
-        Serial.println("⚠️  " + String(alerta));
+        client.publish("sala/alertas", "Umidade fora do ideal");
+        Serial.println("⚠️  Alerta: Umidade!");
       }
     }
 
-    // Processa luminosidade
+    // Luminosidade
     if (xQueueReceive(queueLuz, &luminosidade, 0) == pdTRUE)
     {
       char buffer[10];
       dtostrf(luminosidade, 6, 2, buffer);
       client.publish("sala/luminosidade", buffer);
-      Serial.printf("💡 Luminosidade: %.2f %%\n", luminosidade);
+      Serial.printf("💡 Luz: %.2f%%\n", luminosidade);
     }
 
-    // Processa presença
-    if (xQueueReceive(queuePresenca, &presenca, 0) == pdTRUE)
+    // Entrada/Saída
+    if (xQueueReceive(queueEntradaSaida, &eventoEntradaSaida, 0) == pdTRUE)
     {
-      if (presenca)
+      if (eventoEntradaSaida == 1)
       {
-        client.publish("sala/presenca", "DETECTADA");
-        client.publish("sala/ocupacao", "OCUPADA");
-        Serial.println("👤 PRESENÇA DETECTADA - Sala OCUPADA - LED LIGADO");
+        pessoasNaSala++;
+        salaOcupada = (pessoasNaSala > 0);
+        char buffer[50];
+        snprintf(buffer, 50, "%d", pessoasNaSala);
+        client.publish("sala/entrada", "DETECTADA");
+        client.publish("sala/pessoas", buffer);
+        client.publish("sala/ocupacao", salaOcupada ? "OCUPADA" : "VAZIA");
+        Serial.printf("👤➡️  ENTRADA - %d pessoas\n", pessoasNaSala);
       }
-      else
+      else if (eventoEntradaSaida == -1)
       {
-        client.publish("sala/presenca", "NAO_DETECTADA");
-        client.publish("sala/ocupacao", "VAZIA");
-        Serial.println("🚪 Presença NÃO detectada - Sala VAZIA - LED DESLIGADO");
+        pessoasNaSala--;
+        if (pessoasNaSala < 0)
+          pessoasNaSala = 0;
+        salaOcupada = (pessoasNaSala > 0);
+        char buffer[50];
+        snprintf(buffer, 50, "%d", pessoasNaSala);
+        client.publish("sala/saida", "DETECTADA");
+        client.publish("sala/pessoas", buffer);
+        client.publish("sala/ocupacao", salaOcupada ? "OCUPADA" : "VAZIA");
+        Serial.printf("👤⬅️  SAÍDA - %d pessoas\n", pessoasNaSala);
       }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(100)); // Loop rápido
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
-
 // ========== SETUP ==========
 void setup()
 {
   Serial.begin(115200);
   delay(1000);
 
-  Serial.println("\n\n");
-  Serial.println("╔════════════════════════════════════════════════╗");
-  Serial.println("║  Sistema de Monitoramento de Sala Inteligente ║");
-  Serial.println("║              GRUPO 10 - ESP32                  ║");
-  Serial.println("╚════════════════════════════════════════════════╝");
+  Serial.println("\n╔═══════════════════════════════════╗");
+  Serial.println("║  Sala Inteligente - Grupo 10     ║");
+  Serial.println("╚═══════════════════════════════════╝");
 
-  // Detecta sensores disponíveis
   detectarSensores();
-
-  // Conecta Wi-Fi
   setup_wifi();
-
-  // Configura MQTT
-  client.setServer(MQTT_IP, MQTT_PORT);
+  
+  // Configura MQTT com timeouts maiores
+  client.setServer(mqtt_server, MQTT_PORT);
+  client.setKeepAlive(60);        // Keep-alive de 60s
+  client.setSocketTimeout(15);    // Timeout de 15s
   reconnect();
 
-  // Cria as filas
+  // Cria filas
   queueTemp = xQueueCreate(5, sizeof(float));
   queueUmid = xQueueCreate(5, sizeof(float));
   queueLuz = xQueueCreate(5, sizeof(float));
-  queuePresenca = xQueueCreate(5, sizeof(bool));
+  queueEntradaSaida = xQueueCreate(10, sizeof(int));
 
-  Serial.println("\n╔═══════════════════════════════════════╗");
-  Serial.println("║   CRIANDO TASKS FREERTOS...          ║");
-  Serial.println("╚═══════════════════════════════════════╝");
+  Serial.println("\n╔═══ CRIANDO TASKS ═══╗");
 
-  // Cria tasks apenas para sensores disponíveis (economia de recursos)
+  // Tasks Core 0
   if (dhtDisponivel)
   {
-    xTaskCreatePinnedToCore(
-        taskDHT11, // Função da task
-        "DHT11",   // Nome da task (para debug)
-        4096,      // Stack size (bytes)
-        NULL,      // Parâmetros
-        1,         // Prioridade (1 = normal)
-        NULL,      // Handle (não usado)
-        0          // Core 0 (sensor tasks)
-    );
-    Serial.println("✓ Task DHT11 criada no Core 0");
+    xTaskCreatePinnedToCore(taskDHT11, "DHT11", 4096, NULL, 1, NULL, 0);
+    Serial.println("✓ DHT11 (Core 0)");
   }
 
   if (ldrDisponivel)
   {
-    xTaskCreatePinnedToCore(
-        taskLDR,
-        "LDR",
-        2048,
-        NULL,
-        1,
-        NULL,
-        0);
-    Serial.println("✓ Task LDR criada no Core 0");
+    xTaskCreatePinnedToCore(taskLDR, "LDR", 2048, NULL, 1, NULL, 0);
+    Serial.println("✓ LDR (Core 0)");
   }
 
-  if (pirDisponivel)
+  if (tcrtDisponivel)
   {
-    xTaskCreatePinnedToCore(
-        taskPIR, // Função da task
-        "PIR",   // Nome da task
-        2048,    // Stack size
-        NULL,    // Parâmetros
-        1,       // Prioridade
-        NULL,    // Handle
-        0        // Core 0
-    );
-    Serial.println("✓ Task PIR criada no Core 0");
+    xTaskCreatePinnedToCore(taskTCRT, "TCRT", 4096, NULL, 2, NULL, 0);
+    Serial.println("✓ TCRT (Core 0)");
+    xTaskCreatePinnedToCore(taskLED, "LED", 2048, NULL, 1, NULL, 0);
+    Serial.println("✓ LED (Core 0)");
   }
 
-  // Task MQTT sempre criada - roda no Core 1 (isolado)
-  xTaskCreatePinnedToCore(
-      taskMQTT, // Função da task
-      "MQTT",   // Nome da task
-      4096,     // Stack size (maior por causa de buffers)
-      NULL,     // Parâmetros
-      2,        // Prioridade ALTA (comunicação prioritária)
-      NULL,     // Handle
-      1         // Core 1 (comunicação isolada)
-  );
-  Serial.println("✓ Task MQTT criada no Core 1 (prioridade ALTA)");
+  // Task Core 1
+  xTaskCreatePinnedToCore(taskMQTT, "MQTT", 4096, NULL, 2, NULL, 1);
+  Serial.println("✓ MQTT (Core 1)");
 
-  Serial.println("═══════════════════════════════════════");
-  Serial.println("\n🚀 Sistema iniciado com sucesso!");
-  Serial.println("📡 Monitorando sensores e publicando via MQTT...");
-  Serial.println("🌐 Dashboard disponível no Node-RED\n");
+  Serial.println("╚═════════════════════╝");
+  Serial.println("\n🚀 Sistema iniciado!");
+  Serial.printf("🐳 Broker: %s:%d\n\n", mqtt_server, MQTT_PORT);
 }
 
-// ========== LOOP PRINCIPAL ==========
-// O loop() fica vazio pois o FreeRTOS gerencia todas as tasks automaticamente
-// Cada task roda em seu próprio contexto de forma paralela
 void loop()
 {
-  // Suspende esta task indefinidamente
-  // Todo o trabalho é feito pelas tasks do FreeRTOS
   vTaskDelay(portMAX_DELAY);
 }
