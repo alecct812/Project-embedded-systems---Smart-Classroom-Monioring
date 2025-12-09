@@ -137,6 +137,7 @@ void taskLDR(void *pvParameters)
     if (ldrDisponivel)
     {
       int ldrVal = analogRead(LDR_PIN);
+      ldrVal = (ldrVal - 4095) * -1;
       float luminosidade = map(ldrVal, 0, 4095, 0, 100);
       xQueueSend(queueLuz, &luminosidade, portMAX_DELAY);
     }
