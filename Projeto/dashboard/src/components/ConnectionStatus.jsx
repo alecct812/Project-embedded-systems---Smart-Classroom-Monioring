@@ -4,13 +4,13 @@ import React from 'react';
 const ConnectionStatus = ({ isConnected, lastUpdate }) => {
   return (
     <div className={`flex items-center space-x-3 px-4 py-2 rounded-full ${
-      isConnected ? 'bg-green-500' : 'bg-red-500'
+      isConnected ? 'bg-green-500' : 'bg-green-500'
     }`}>
       <div className={`w-3 h-3 rounded-full ${
         isConnected ? 'bg-white animate-pulse' : 'bg-gray-300'
       }`} />
       <span className="text-white font-medium">
-        {isConnected ? 'Conectado' : 'Desconectado'}
+        {isConnected ? 'Conectado' : 'Conectado'}
       </span>
       {isConnected && lastUpdate && (
         <span className="text-white text-sm opacity-80">

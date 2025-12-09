@@ -1,11 +1,10 @@
 // ========== CONFIGURAÇÃO DO DASHBOARD ==========
 
 // Configure o IP do seu broker MQTT aqui
-// Usando proxy server local para conectar ao broker MQTT TCP
+// Conectando diretamente ao Mosquitto via WebSocket
 export const MQTT_CONFIG = {
-  // URL do proxy WebSocket local
-  // O proxy server (mqtt-proxy-server.js) faz a ponte entre WebSocket e TCP
-  brokerUrl: 'ws://localhost:8080',
+  // URL do Mosquitto WebSocket (porta 9001)
+  brokerUrl: 'ws://localhost:9001',
   
   // Tópicos MQTT que o dashboard vai escutar
   topics: {

@@ -24,7 +24,8 @@ function App() {
     sugestaoAC,
     lastUpdate,
     tempHistory,
-    humidHistory
+    humidHistory,
+    pessoas
   } = useMqttData(BROKER_URL);
 
   // Determina status da temperatura
@@ -95,20 +96,20 @@ function App() {
           />
 
           <StatusCard
-            title="Ocupação"
-            value={ocupacao || 'Aguardando...'}
-            icon="🚪"
-            isActive={ocupacao === 'OCUPADA'}
+            title="Pessoas na Sala"
+            value={pessoas !== null ? `${pessoas} ${pessoas === 1 ? 'pessoa' : 'pessoas'}` : 'Aguardando...'}
+            icon="👥"
+            isActive={pessoas > 0}
           />
         </div>
 
-        {/* Status de Presença */}
+        {/* Status de Ocupação */}
         <div className="mb-8">
           <StatusCard
-            title="Detecção de Presença"
-            value={presenca === 'DETECTADA' ? 'Presença Detectada' : 'Sem Presença'}
-            icon="👤"
-            isActive={presenca === 'DETECTADA'}
+            title="Status da Sala"
+            value={pessoas > 0 ? `Sala OCUPADA (${pessoas} ${pessoas === 1 ? 'pessoa' : 'pessoas'})` : 'Sala VAZIA'}
+            icon="🏫"
+            isActive={pessoas > 0}
           />
         </div>
 

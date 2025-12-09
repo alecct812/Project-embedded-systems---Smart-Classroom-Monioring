@@ -16,8 +16,7 @@
 // ========== CONFIGURAÇÕES ==========
 const char *ssid = "uaifai-tiradentes";
 const char *password = "bemvindoaocesar";
-// IMPORTANTE: Ajuste o IP do broker MQTT conforme seu servidor
-const char *mqtt_server = "172.26.70.17";  // IP do Broker MQTT
+const char *mqtt_server = "172.26.68.19";
 const uint16_t MQTT_PORT = 1883;
 
 #define DHT_PIN 4
@@ -138,6 +137,7 @@ void taskLDR(void *pvParameters)
     if (ldrDisponivel)
     {
       int ldrVal = analogRead(LDR_PIN);
+      ldrVal = (ldrVal - 4095) * -1;
       float luminosidade = map(ldrVal, 0, 4095, 0, 100);
       xQueueSend(queueLuz, &luminosidade, portMAX_DELAY);
     }

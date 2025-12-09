@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
+import mqtt from 'mqtt';
 
-// Hook customizado para gerenciar dados via WebSocket proxy
+// Hook customizado para gerenciar dados MQTT
 const useMqttData = (brokerUrl) => {
   // Estados para todos os dados
   const [isConnected, setIsConnected] = useState(false);
@@ -12,13 +13,11 @@ const useMqttData = (brokerUrl) => {
   const [alertas, setAlertas] = useState([]);
   const [sugestaoAC, setSugestaoAC] = useState(null);
   const [lastUpdate, setLastUpdate] = useState(null);
+  const [pessoas, setPessoas] = useState(0);  // Número de pessoas na sala
 
   // Histórico para gráficos (últimos 20 pontos)
   const [tempHistory, setTempHistory] = useState([]);
   const [humidHistory, setHumidHistory] = useState([]);
-
-  const wsRef = useRef(null);
-  const reconnectTimeoutRef = useRef(null);
 
   // Função auxiliar para formatar hora
   const getTimeString = () => {
@@ -37,113 +36,144 @@ const useMqttData = (brokerUrl) => {
   };
 
   useEffect(() => {
-    // Conecta ao proxy WebSocket
-    const connectWebSocket = () => {
-      console.log(`🔌 Conectando ao proxy: ${brokerUrl}`);
-      const ws = new WebSocket(brokerUrl);
-      wsRef.current = ws;
+    console.log(`🔌 Conectando ao broker: ${brokerUrl}`);
+    
+    // Conecta ao broker MQTT via WebSocket
+    const client = mqtt.connect(brokerUrl, {
+      reconnectPeriod: 5000,
+      connectTimeout: 10000,
+    });
 
-      ws.onopen = () => {
-        console.log('✅ Conectado ao proxy WebSocket');
-        setIsConnected(true);
-        // O proxy já subscreve automaticamente aos tópicos
-      };
+    client.on('connect', () => {
+      console.log('✅ Conectado ao broker MQTT');
+      setIsConnected(true);
 
-      ws.onmessage = (event) => {
-        try {
-          // O proxy envia mensagens no formato JSON
-          const data = JSON.parse(event.data);
-          const { topic, payload } = data;
-          const value = payload;
-          const now = getTimeString();
-          setLastUpdate(now);
+      // Subscreve aos tópicos
+      const topics = [
+        'sala/temperatura',
+        'sala/umidade',
+        'sala/luminosidade',
+        'sala/presenca',
+        'sala/ocupacao',
+        'sala/alertas',
+        'sala/sugestao_ac',
+        'sala/pessoas',
+        'sala/entrada',
+        'sala/saida',
+        'sala/status',
+      ];
 
-          console.log(`📨 Recebido: ${topic} = ${value}`);
-
-          // Processa mensagens baseado no tópico
-          switch (topic) {
-            case 'sala/temperatura':
-              const temp = parseFloat(value);
-              setTemperatura(temp);
-              addToHistory(setTempHistory, temp);
-              break;
-
-            case 'sala/umidade':
-              const umid = parseFloat(value);
-              setUmidade(umid);
-              addToHistory(setHumidHistory, umid);
-              break;
-
-            case 'sala/luminosidade':
-              setLuminosidade(parseFloat(value));
-              break;
-
-            case 'sala/presenca':
-              setPresenca(value);
-              break;
-
-            case 'sala/ocupacao':
-              setOcupacao(value);
-              break;
-
-            case 'sala/alertas':
-              // Adiciona alerta à lista (mantém últimos 10)
-              setAlertas(prev => {
-                const newAlerts = [value, ...prev].slice(0, 10);
-                return newAlerts;
-              });
-              break;
-
-            case 'sala/sugestao_ac':
-              setSugestaoAC(value);
-              break;
-
-            case 'sala/pessoas':
-              // Tópico de contagem de pessoas
-              break;
-
-            case 'sala/status':
-              // Status do ESP32
-              break;
-
-            default:
-              console.log(`Tópico desconhecido: ${topic}`, value);
-              break;
+      topics.forEach(topic => {
+        client.subscribe(topic, (err) => {
+          if (err) {
+            console.error(`❌ Erro ao subscrever ${topic}:`, err);
+          } else {
+            console.log(`📡 Subscrito ao tópico: ${topic}`);
           }
-        } catch (error) {
-          console.error('❌ Erro ao processar mensagem:', error);
-        }
-      };
+        });
+      });
+    });
 
-      ws.onerror = (error) => {
-        console.error('❌ Erro WebSocket:', error);
-        setIsConnected(false);
-      };
+    client.on('message', (topic, message) => {
+      const value = message.toString().trim();
+      const now = getTimeString();
+      setLastUpdate(now);
 
-      ws.onclose = () => {
-        console.log('🔌 Conexão WebSocket fechada');
-        setIsConnected(false);
-        
-        // Reconecta após 5 segundos
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-        }
-        reconnectTimeoutRef.current = setTimeout(() => {
-          console.log('🔄 Tentando reconectar...');
-          connectWebSocket();
-        }, 5000);
-      };
-    };
+      console.log(`📨 Mensagem recebida: ${topic} = ${value}`);
 
-    connectWebSocket();
+      // Processa mensagens baseado no tópico
+      switch (topic) {
+        case 'sala/temperatura':
+          const temp = parseFloat(value);
+          if (!isNaN(temp)) {
+            setTemperatura(temp);
+            addToHistory(setTempHistory, temp);
+          }
+          break;
+
+        case 'sala/umidade':
+          const umid = parseFloat(value);
+          if (!isNaN(umid)) {
+            setUmidade(umid);
+            addToHistory(setHumidHistory, umid);
+          }
+          break;
+
+        case 'sala/luminosidade':
+          const luz = parseFloat(value);
+          if (!isNaN(luz)) {
+            setLuminosidade(luz);
+          }
+          break;
+
+        case 'sala/presenca':
+          setPresenca(value);
+          break;
+
+        case 'sala/ocupacao':
+          setOcupacao(value);
+          break;
+
+        case 'sala/alertas':
+          // Adiciona alerta à lista (mantém últimos 10)
+          setAlertas(prev => {
+            const newAlerts = [value, ...prev].slice(0, 10);
+            return newAlerts;
+          });
+          break;
+
+        case 'sala/sugestao_ac':
+          setSugestaoAC(value);
+          break;
+
+        case 'sala/pessoas':
+          const numPessoas = parseInt(value, 10);
+          if (!isNaN(numPessoas)) {
+            setPessoas(numPessoas);
+            console.log(`👥 Pessoas na sala: ${numPessoas}`);
+          }
+          break;
+
+        case 'sala/entrada':
+          console.log('🚪➡️ Entrada detectada');
+          break;
+
+        case 'sala/saida':
+          console.log('🚪⬅️ Saída detectada');
+          break;
+
+        case 'sala/status':
+          console.log(`📡 Status ESP32: ${value}`);
+          break;
+
+        default:
+          break;
+      }
+    });
+
+    client.on('error', (err) => {
+      console.error('❌ Erro MQTT:', err);
+      setIsConnected(false);
+    });
+
+    client.on('close', () => {
+      console.log('🔌 Conexão MQTT fechada');
+      setIsConnected(false);
+    });
+
+    client.on('reconnect', () => {
+      console.log('🔄 Tentando reconectar ao MQTT...');
+    });
+
+    client.on('offline', () => {
+      console.log('⚠️ MQTT offline');
+      setIsConnected(false);
+    });
 
     // Cleanup ao desmontar
     return () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
+      if (client) {
+        client.end();
       }
     };
   }, [brokerUrl]);
@@ -159,7 +189,8 @@ const useMqttData = (brokerUrl) => {
     sugestaoAC,
     lastUpdate,
     tempHistory,
-    humidHistory
+    humidHistory,
+    pessoas  // Número de pessoas na sala
   };
 };
 
