@@ -1,0 +1,15 @@
+{
+  "name": "mqtt-proxy-server",
+  "version": "1.0.0",
+  "description": "Servidor Proxy MQTT WebSocket para Dashboard",
+  "type": "module",
+  "main": "mqtt-proxy-server.js",
+  "scripts": {
+    "start": "node mqtt-proxy-server.js"
+  },
+  "dependencies": {
+    "mqtt": "^5.14.1",
+    "ws": "^8.18.3"
+  }
+}
+
